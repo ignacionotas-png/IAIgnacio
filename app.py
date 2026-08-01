@@ -1,79 +1,90 @@
 import streamlit as st
-import os
+from groq import Groq
+from tavily import TavilyClient
+import json
 
-# --- TRUCO DE COMPATIBILIDAD ---
-# Intentamos importar AgentExecutor de varias formas posibles
-try:
-    from langchain.agents import AgentExecutor
-except ImportError:
-    try:
-        from langchain.agents.agent import AgentExecutor
-    except ImportError:
-        from langchain.agents.executor import AgentExecutor
-
-try:
-    from langchain.agents import create_tool_calling_agent
-except ImportError:
-    from langchain.agents.tool_calling_agent.base import create_tool_calling_agent
-
-from langchain_groq import ChatGroq
-from langchain_community.tools.tavily_search import TavilySearchResults
-from langchain_experimental.utilities import PythonREPL
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.tools import Tool
-
-# Configuración de página
+# Configuración de la página
 st.set_page_config(page_title="Mi IA Privada", page_icon="🤖")
 st.title("🤖 Mi Gemini Personal")
 
-# 1. Configurar Herramientas
-try:
-    search = TavilySearchResults(api_key=st.secrets["TAVILY_API_KEY"])
-    python_repl = PythonREPL()
+# Inicializar Clientes
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+tavily = TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
 
-    tools = [
-        Tool(name="Buscador", func=search.run, description="Busca en internet información actual."),
-        Tool(name="Calculadora", func=python_repl.run, description="Resuelve problemas matemáticos con código Python.")
-    ]
+# Definición de herramientas para la IA
+def buscar_en_web(query):
+    return tavily.search(query=query)["results"]
 
-    # 2. Configurar Cerebro
-    llm = ChatGroq(
-        api_key=st.secrets["GROQ_API_KEY"],
-        model_name="llama3-70b-8192",
-        temperature=0
-    )
+def calcular(operacion):
+    try:
+        # Esto permite resolver cualquier cuenta matemática en Python
+        return str(eval(operacion, {"__builtins__": None}, {"abs": abs, "pow": pow}))
+    except:
+        return "Error en el cálculo"
 
-    # 3. Prompt de Sistema
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "Eres un asistente útil con acceso a internet y calculadora. Responde siempre en español."),
-        ("placeholder", "{chat_history}"),
-        ("human", "{input}"),
-        ("placeholder", "{agent_scratchpad}"),
-    ])
+# Configuración del historial
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-    # 4. Crear el Agente y el Ejecutor
-    agent = create_tool_calling_agent(llm, tools, prompt)
-    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
 
-    # 5. Interfaz de Chat
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+if prompt := st.chat_input("¿En qué puedo ayudarte?"):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-    for m in st.session_state.messages:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
+    with st.chat_message("assistant"):
+        # 1. Enviar pregunta a Groq
+        response = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[{"role": "user", "content": prompt}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "buscar_en_web",
+                        "description": "Busca información actual en internet",
+                        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "calcular",
+                        "description": "Resuelve operaciones matemáticas",
+                        "parameters": {"type": "object", "properties": {"operacion": {"type": "string"}}}
+                    }
+                }
+            ]
+        )
 
-    if p := st.chat_input("¿En qué puedo ayudarte hoy?"):
-        st.session_state.messages.append({"role": "user", "content": p})
-        with st.chat_message("user"):
-            st.markdown(p)
+        msg = response.choices[0].message
         
-        with st.chat_message("assistant"):
-            # Ejecutamos el agente
-            response = agent_executor.invoke({"input": p})["output"]
-            st.markdown(response)
-            st.session_state.messages.append({"role": "assistant", "content": response})
+        # 2. Verificar si la IA quiere usar una herramienta
+        if msg.tool_calls:
+            for tool_call in msg.tool_calls:
+                func_name = tool_call.function.name
+                args = json.loads(tool_call.function.arguments)
+                
+                if func_name == "buscar_en_web":
+                    res = buscar_en_web(args['query'])
+                else:
+                    res = calcular(args['operacion'])
+                
+                # Pedir a la IA que redacte la respuesta final con los datos obtenidos
+                final_res = client.chat.completions.create(
+                    model="llama3-70b-8192",
+                    messages=[
+                        {"role": "user", "content": prompt},
+                        msg,
+                        {"role": "tool", "tool_call_id": tool_call.id, "content": str(res)}
+                    ]
+                )
+                answer = final_res.choices[0].message.content
+        else:
+            answer = msg.content
 
-except Exception as e:
-    st.error(f"Error de inicio: {e}")
-    st.info("Revisa tus Secrets en la configuración de Streamlit.")
+        st.markdown(answer)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
