@@ -7,24 +7,24 @@ import json
 st.set_page_config(page_title="Mi IA Privada", page_icon="🤖")
 st.title("🤖 Mi Gemini Personal")
 
-# Inicializar Clientes (con validación)
+# Inicializar Clientes
 try:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
     tavily = TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
 except Exception as e:
-    st.error("Error con las API Keys. Revisa tus Secrets.")
+    st.error("Error con las API Keys. Revisa tus Secrets en Streamlit.")
     st.stop()
 
 # Definición de herramientas
 def buscar_en_web(query):
     try:
-        return str(tavily.search(query=query, search_depth="basic")["results"])
+        search_result = tavily.search(query=query, search_depth="basic")
+        return str(search_result["results"])
     except:
         return "No pude encontrar resultados en la web."
 
 def calcular(operacion):
     try:
-        # Limpiamos la operación de caracteres extraños
         operacion = operacion.replace("^", "**")
         return str(eval(operacion, {"__builtins__": None}, {"abs": abs, "pow": pow}))
     except:
@@ -44,13 +44,14 @@ if prompt := st.chat_input("¿En qué puedo ayudarte?"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        # Mensajes para la IA incluyendo un System Prompt
+        # Modelos actuales de Groq: llama-3.3-70b-versatile o llama-3.1-70b-versatile
+        MODELO = "llama-3.3-70b-versatile"
+        
         mensajes_ia = [
-            {"role": "system", "content": "Eres un asistente experto. Si te piden buscar algo actual o hacer cuentas, DEBES usar tus herramientas."},
+            {"role": "system", "content": "Eres un asistente experto. Si te piden buscar algo actual o hacer cuentas, usa tus herramientas. Responde siempre en español."},
             {"role": "user", "content": prompt}
         ]
 
-        # Definición corregida de herramientas (con 'required')
         tools = [
             {
                 "type": "function",
@@ -79,9 +80,9 @@ if prompt := st.chat_input("¿En qué puedo ayudarte?"):
         ]
 
         try:
-            # 1. Primera llamada a Groq
+            # 1. Llamada a Groq
             response = client.chat.completions.create(
-                model="llama3-70b-8192",
+                model=MODELO,
                 messages=mensajes_ia,
                 tools=tools,
                 tool_choice="auto"
@@ -90,7 +91,6 @@ if prompt := st.chat_input("¿En qué puedo ayudarte?"):
             response_message = response.choices[0].message
             tool_calls = response_message.tool_calls
 
-            # 2. Si la IA decide usar herramientas
             if tool_calls:
                 mensajes_ia.append(response_message)
                 
@@ -99,20 +99,19 @@ if prompt := st.chat_input("¿En qué puedo ayudarte?"):
                     args = json.loads(tool_call.function.arguments)
                     
                     if func_name == "buscar_en_web":
-                        resultado_herramienta = buscar_en_web(args.get("query"))
+                        resultado = buscar_en_web(args.get("query"))
                     else:
-                        resultado_herramienta = calcular(args.get("operacion"))
+                        resultado = calcular(args.get("operacion"))
                     
                     mensajes_ia.append({
                         "tool_call_id": tool_call.id,
                         "role": "tool",
                         "name": func_name,
-                        "content": resultado_herramienta
+                        "content": resultado
                     })
                 
-                # Segunda llamada para procesar los datos de la herramienta
                 segunda_respuesta = client.chat.completions.create(
-                    model="llama3-70b-8192",
+                    model=MODELO,
                     messages=mensajes_ia
                 )
                 answer = segunda_respuesta.choices[0].message.content
@@ -123,7 +122,7 @@ if prompt := st.chat_input("¿En qué puedo ayudarte?"):
             st.session_state.messages.append({"role": "assistant", "content": answer})
 
         except Exception as e:
-            st.error(f"Error de comunicación: {e}")
+            st.error(f"Error de Groq: {e}")
             answer = msg.content
 
         st.markdown(answer)
