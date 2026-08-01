@@ -7,22 +7,30 @@ import json
 st.set_page_config(page_title="Mi IA Privada", page_icon="🤖")
 st.title("🤖 Mi Gemini Personal")
 
-# Inicializar Clientes
-client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-tavily = TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
+# Inicializar Clientes (con validación)
+try:
+    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+    tavily = TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
+except Exception as e:
+    st.error("Error con las API Keys. Revisa tus Secrets.")
+    st.stop()
 
-# Definición de herramientas para la IA
+# Definición de herramientas
 def buscar_en_web(query):
-    return tavily.search(query=query)["results"]
+    try:
+        return str(tavily.search(query=query, search_depth="basic")["results"])
+    except:
+        return "No pude encontrar resultados en la web."
 
 def calcular(operacion):
     try:
-        # Esto permite resolver cualquier cuenta matemática en Python
+        # Limpiamos la operación de caracteres extraños
+        operacion = operacion.replace("^", "**")
         return str(eval(operacion, {"__builtins__": None}, {"abs": abs, "pow": pow}))
     except:
-        return "Error en el cálculo"
+        return "Error en el cálculo matemático."
 
-# Configuración del historial
+# Historial de chat
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -36,54 +44,86 @@ if prompt := st.chat_input("¿En qué puedo ayudarte?"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        # 1. Enviar pregunta a Groq
-        response = client.chat.completions.create(
-            model="llama3-70b-8192",
-            messages=[{"role": "user", "content": prompt}],
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "buscar_en_web",
-                        "description": "Busca información actual en internet",
-                        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}
-                    }
-                },
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "calcular",
-                        "description": "Resuelve operaciones matemáticas",
-                        "parameters": {"type": "object", "properties": {"operacion": {"type": "string"}}}
+        # Mensajes para la IA incluyendo un System Prompt
+        mensajes_ia = [
+            {"role": "system", "content": "Eres un asistente experto. Si te piden buscar algo actual o hacer cuentas, DEBES usar tus herramientas."},
+            {"role": "user", "content": prompt}
+        ]
+
+        # Definición corregida de herramientas (con 'required')
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "buscar_en_web",
+                    "description": "Busca información actualizada en internet",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string", "description": "El término de búsqueda"}},
+                        "required": ["query"]
                     }
                 }
-            ]
-        )
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "calcular",
+                    "description": "Resuelve operaciones matemáticas",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"operacion": {"type": "string", "description": "La operación matemática (ej: 2+2)"}},
+                        "required": ["operacion"]
+                    }
+                }
+            }
+        ]
 
-        msg = response.choices[0].message
-        
-        # 2. Verificar si la IA quiere usar una herramienta
-        if msg.tool_calls:
-            for tool_call in msg.tool_calls:
-                func_name = tool_call.function.name
-                args = json.loads(tool_call.function.arguments)
+        try:
+            # 1. Primera llamada a Groq
+            response = client.chat.completions.create(
+                model="llama3-70b-8192",
+                messages=mensajes_ia,
+                tools=tools,
+                tool_choice="auto"
+            )
+
+            response_message = response.choices[0].message
+            tool_calls = response_message.tool_calls
+
+            # 2. Si la IA decide usar herramientas
+            if tool_calls:
+                mensajes_ia.append(response_message)
                 
-                if func_name == "buscar_en_web":
-                    res = buscar_en_web(args['query'])
-                else:
-                    res = calcular(args['operacion'])
+                for tool_call in tool_calls:
+                    func_name = tool_call.function.name
+                    args = json.loads(tool_call.function.arguments)
+                    
+                    if func_name == "buscar_en_web":
+                        resultado_herramienta = buscar_en_web(args.get("query"))
+                    else:
+                        resultado_herramienta = calcular(args.get("operacion"))
+                    
+                    mensajes_ia.append({
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": func_name,
+                        "content": resultado_herramienta
+                    })
                 
-                # Pedir a la IA que redacte la respuesta final con los datos obtenidos
-                final_res = client.chat.completions.create(
+                # Segunda llamada para procesar los datos de la herramienta
+                segunda_respuesta = client.chat.completions.create(
                     model="llama3-70b-8192",
-                    messages=[
-                        {"role": "user", "content": prompt},
-                        msg,
-                        {"role": "tool", "tool_call_id": tool_call.id, "content": str(res)}
-                    ]
+                    messages=mensajes_ia
                 )
-                answer = final_res.choices[0].message.content
-        else:
+                answer = segunda_respuesta.choices[0].message.content
+            else:
+                answer = response_message.content
+
+            st.markdown(answer)
+            st.session_state.messages.append({"role": "assistant", "content": answer})
+
+        except Exception as e:
+            st.error(f"Error de comunicación: {e}")
             answer = msg.content
 
         st.markdown(answer)
